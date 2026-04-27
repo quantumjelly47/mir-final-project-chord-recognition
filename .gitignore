@@ -1,4 +1,14 @@
+# folders
 /data
+.vscode/
+__pycache__/
 
+# python
+*.pyc
+
+# generated outputs
 *.wav
 *.csv
+
+# mac
+.DS_Store
