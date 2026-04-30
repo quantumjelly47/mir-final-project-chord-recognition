@@ -2,6 +2,7 @@
 /data
 .vscode/
 __pycache__/
+/materials
 
 # python
 *.pyc
