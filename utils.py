@@ -294,10 +294,10 @@ def save_estimates_csv(estimates_dict, beat_times_dict, filepath):
     # beat_times_dict - mtrack_id: [t0, t1, t2, t3, ...]
     import pandas as pd
     rows = []
-    for mtrack_id, (chords, sims) in estimates_dict.items():
-        times = beat_times_dict[mtrack_id]
-        n = min(len(chords), len(times) - 1)
-        for i in range(n):
+    for mtrack_id, (chords, sims) in estimates_dict.items(): # run through every track
+        times = beat_times_dict[mtrack_id]                   # get the related time segment
+        n = min(len(chords), len(times) - 1)  
+        for i in range(n): # run one time for every segment
             chord = chords[i]
             if isinstance(chord, tuple):  # handle the ('N', sim) edge case
                 chord = chord[0]
@@ -308,4 +308,4 @@ def save_estimates_csv(estimates_dict, beat_times_dict, filepath):
                 'chord': chord if chord else 'N',
                 'similarity': sims[i],
             })
-    pd.DataFrame(rows).to_csv(filepath, index=False)
+    pd.DataFrame(rows).to_csv(filepath, index=False) # save as csv file
