@@ -265,4 +265,47 @@ def classify_chord(mtrack_pcp, templates):
     mtrack_sim[i] = best_sim
 
   return mtrack_chords, mtrack_sim
-  
+
+
+# ---------- Evaluation helpers ----------
+
+
+def normalize_chord_label(label):
+    """Map an arbitrary chord label (e.g. CREMA output) to the maj/min/N vocabulary."""
+    # if n/c, no chord, null, use N
+    if label in ('N', 'X', '', None):
+        return 'N'
+    try:
+        # get the root and the quality
+        root, quality = label.split(':', 1)
+        quality = quality.split('/')[0] # strip bass note
+        # any hdim, dim chord will be detected as a minor chord
+        if any(q in quality for q in ('min', 'hdim', 'dim')):
+            return f'{root}:min'
+        return f'{root}:maj'
+    # if failed, except 'N'
+    except Exception:
+        return 'N'
+
+
+def save_estimates_csv(estimates_dict, beat_times_dict, filepath):
+    """Save chord estimates to CSV: mtrack_id, start_time, end_time, chord, similarity."""
+    # estimates_dict  - mtrack_id: (chords, sims)
+    # beat_times_dict - mtrack_id: [t0, t1, t2, t3, ...]
+    import pandas as pd
+    rows = []
+    for mtrack_id, (chords, sims) in estimates_dict.items():
+        times = beat_times_dict[mtrack_id]
+        n = min(len(chords), len(times) - 1)
+        for i in range(n):
+            chord = chords[i]
+            if isinstance(chord, tuple):  # handle the ('N', sim) edge case
+                chord = chord[0]
+            rows.append({
+                'mtrack_id': mtrack_id,
+                'start_time': times[i],
+                'end_time': times[i + 1],
+                'chord': chord if chord else 'N',
+                'similarity': sims[i],
+            })
+    pd.DataFrame(rows).to_csv(filepath, index=False)
