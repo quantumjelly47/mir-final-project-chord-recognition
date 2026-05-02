@@ -268,8 +268,6 @@ def classify_chord(mtrack_pcp, templates):
 
 
 # ---------- Evaluation helpers ----------
-
-
 def normalize_chord_label(label):
     """Map an arbitrary chord label (e.g. CREMA output) to the maj/min/N vocabulary."""
     # if n/c, no chord, null, use N
@@ -286,7 +284,6 @@ def normalize_chord_label(label):
     # if failed, except 'N'
     except Exception:
         return 'N'
-
 
 def save_estimates_csv(estimates_dict, beat_times_dict, filepath):
     """Save chord estimates to CSV: mtrack_id, start_time, end_time, chord, similarity."""
@@ -309,3 +306,94 @@ def save_estimates_csv(estimates_dict, beat_times_dict, filepath):
                 'similarity': sims[i],
             })
     pd.DataFrame(rows).to_csv(filepath, index=False) # save as csv file
+
+
+def load_cassette_csv(filepath, mtrack_id):
+    """
+    Load CASSETTE (our own model) estimates for one track as (intervals, labels) for mir_eval.
+    """
+    import pandas as pd
+
+    # get time interval
+    df = pd.read_csv(filepath) # read csv
+    df = df[df['mtrack_id'] == mtrack_id].copy() # keep current track only
+    df = df.sort_values('start_time').reset_index(drop=True) # sort in chronological order
+
+    intervals = df[['start_time', 'end_time']].to_numpy(dtype=float)
+    
+    # get chord labels
+    labels = [normalize_chord_label(c) for c in df['chord'].fillna('N')]
+
+    return intervals, labels
+
+
+def load_crema_csv(filepath):
+    """Load a CREMA prediction CSV for one track as (intervals, labels) for mir_eval."""
+    import pandas as pd
+
+    # read csv
+    df = pd.read_csv(filepath)
+
+    # CREMA stores times as JAMS Timedelta strings; fall back to float if already numeric
+    # change start timecode to seconds: 0 days 00:00:01.500000 -> 1.5
+    try:
+        start_sec = pd.to_timedelta(df['time']).dt.total_seconds()
+    except Exception:
+        start_sec = df['time'].astype(float)
+
+    # convert duration timecode to seconds
+    try:
+        dur_sec = pd.to_timedelta(df['duration']).dt.total_seconds()
+    except Exception:
+        dur_sec = df['duration'].astype(float)
+
+    end_sec = start_sec + dur_sec
+
+    order = start_sec.argsort().values # sort chronologically for mir_eval
+    start_sec  = start_sec.iloc[order].reset_index(drop=True)
+    end_sec    = end_sec.iloc[order].reset_index(drop=True)
+    labels_raw = df['value'].iloc[order].reset_index(drop=True)
+
+    intervals = np.column_stack([start_sec.to_numpy(dtype=float),
+                                 end_sec.to_numpy(dtype=float)])
+    labels = [normalize_chord_label(v) for v in labels_raw.fillna('N')]
+
+    return intervals, labels
+
+
+def evaluate_tracks(cassette_csv, crema_csv_dir, track_ids, crema_filename_fmt='{}.csv'):
+    """Evaluate CASSETTE against CREMA for all tracks; return per-track scores and their mean."""
+    import os
+
+    per_track = {}
+    all_scores = []
+
+
+    for track_id in track_ids:
+        crema_file = os.path.join(crema_csv_dir, crema_filename_fmt.format(track_id))
+        try:
+            # CREMA is the reference (established baseline); CASSETTE is the estimate
+            # load both csv file
+            ref_intervals, ref_labels = load_crema_csv(crema_file)
+            est_intervals, est_labels = load_cassette_csv(cassette_csv, track_id)
+
+            # evaluation core function
+            scores = mir_eval.chord.evaluate(ref_intervals, ref_labels,
+                                             est_intervals, est_labels)
+            per_track[track_id] = scores
+            all_scores.append(scores)
+
+        except Exception as e:
+            print(f"[evaluate_tracks] Skipping {track_id}: {e}") # keep going on bad tracks
+
+    if all_scores:  # if array is not emplty
+        metric_keys = all_scores[0].keys() # Get the metric names (e.g., 'root', 'triads', etc.) from the first track
+        # For each metric, collect its values across all tracks and compute the mean
+        mean_scores = {key: float(np.mean([s[key] for s in all_scores])) 
+                       for key in metric_keys}
+    else:
+        # If no tracks were successfully evaluated, return an empty result
+        mean_scores = {}
+        print("[evaluate_tracks] Warning: no tracks were evaluated successfully.")
+
+    return per_track, mean_scores
