@@ -5,6 +5,8 @@ import mir_eval
 import mirdata
 import numpy as np
 import pretty_midi as pm
+import pandas as pd
+import os
 
 
 def load_data(dataset_name, data_home, dataset_version="default"):
@@ -135,7 +137,7 @@ def weighted_pitch_class(segment_dict):
     # Scores for the full track
       mtrack_scores = np.zeros_like(segments)
       # Iterate over segments, take one segment at a time
-      for i in range(len(segments)-1):
+      for i in range(len(segments)):
         segment = segments[i]
         # Create pitch class profile array
         pcp = np.zeros(12)
@@ -231,7 +233,7 @@ def classify_chord(mtrack_pcp, templates):
   mtrack_sim = np.zeros(len(mtrack_pcp)) 
 
   # Iterate over length of track pcp scores
-  for i in range(len(mtrack_pcp)-1):
+  for i in range(len(mtrack_pcp)):
    
     pcp = mtrack_pcp[i] # Current pitch class profile
     best_chord = None    # Base values
@@ -266,134 +268,190 @@ def classify_chord(mtrack_pcp, templates):
 
   return mtrack_chords, mtrack_sim
 
+def save_cassette_csv(beats, chord_estimates, track):
+  """
+  Save CASSETTE model outputs in correct format (start_time, end_time, value)
 
-# ---------- Evaluation helpers ----------
-def normalize_chord_label(label):
-    """Map an arbitrary chord label (e.g. CREMA output) to the maj/min/N vocabulary."""
-    # if n/c, no chord, null, use N
-    if label in ('N', 'X', '', None):
+  Parameters
+  ----------
+  beats (dict): dictionary of beats keyed by track id
+  chord_estimates (dict): dictionary of chord estimates keyed by track id
+  track (str): track id
+
+  Returns
+  -------
+  None
+  """
+
+  cassette_csv = pd.DataFrame({'start_time': beats[track][:-1], 
+                                'end_time': beats[track][1:], 
+                                'value': chord_estimates[track][0]})
+  
+  os.makedirs('./output/cassette', exist_ok=True)
+
+  file_path = f"./output/cassette/{track}.csv"
+  cassette_csv.to_csv(file_path, index=False)
+
+def majority_label(beat_start, beat_end, segments):
+  """
+  Finds chord label that occupies majority of interval length
+
+  """
+  scores = {}
+
+  for row in segments.itertuples(index=False):
+      # compute overlap
+      overlap = min(row.end_time, beat_end) - max(row.start_time, beat_start)
+
+      if overlap <= 0:
+          continue
+
+      scores[row.value] = scores.get(row.value, 0.0) + overlap
+
+  if not scores:
+      return 'N'
+
+  return max(scores, key=scores.get)
+
+def process_crema_df(df, enharmonic_map):
+  """
+  Process output of crema for easy use with beatwise comparison and chord.evaluate comparison
+
+  Parameters
+  ----------
+  df (pandas DataFrame): crema df
+  enharmonic_map (dict): enharmonic maps for standardization
+
+  Returns
+  -------
+  df (pandas DataFrame): preprocessed crema df
+  """
+
+  df['end_time'] = df['time'] + df['duration']
+  df = df.rename(columns={'time': 'start_time'})
+  df['value'] = (df['value']
+                 .replace({'X': 'N'})
+                 .map(lambda x: enharmonic_map.get(x, x)))
+  
+  return df
+
+def get_beatwise_crema(df, ref_df, majority_label):
+  """
+  Process crema df for accurate comparison with cassette df beatwise
+  """
+  crema_beatwise_labels = []
+
+  for i in range(len(ref_df)):
+      # get interval
+      start = ref_df.loc[i, 'start_time']
+      end = ref_df.loc[i, 'end_time']
+      # get crema's chord label(s) that are active within the interval
+      crema_segments = df[(df['start_time'] < end) & (df['end_time'] > start)][['start_time', 'end_time', 'value']]
+      # get majority label
+      label = majority_label(start, end, crema_segments)
+      crema_beatwise_labels.append(label)
+
+  crema_beatwise_df = pd.DataFrame({'start_time': ref_df['start_time'].values, 
+                                      'end_time': ref_df['end_time'].values, 
+                                      'value': crema_beatwise_labels})
+  
+  return crema_beatwise_df
+
+def normalize_chord_label(chord):
+    """
+    Preprocess chord labels to standardize across crema and cassette's outputs
+
+    Parameters
+    ----------
+    chord (str): chord label
+
+    Returns
+    -------
+    Normalized chord label
+    """
+
+    if chord == 'N':
         return 'N'
-    try:
-        # get the root and the quality
-        root, quality = label.split(':', 1)
-        quality = quality.split('/')[0] # strip bass note
-        # any hdim, dim chord will be detected as a minor chord
-        if any(q in quality for q in ('min', 'hdim', 'dim')):
-            return f'{root}:min'
+
+    # remove inversion
+    chord = chord.split('/')[0]
+
+    # split root / quality
+    root, qual = chord.split(':')
+
+    # triad reduction
+    if qual.startswith('min'):
+        return f'{root}:min'
+    if qual.startswith('maj'):
         return f'{root}:maj'
-    # if failed, except 'N'
-    except Exception:
-        return 'N'
+    if qual == '7':
+        return f'{root}:maj'
 
-def save_estimates_csv(estimates_dict, beat_times_dict, filepath):
-    """Save chord estimates to CSV: mtrack_id, start_time, end_time, chord, similarity."""
-    # estimates_dict  - mtrack_id: (chords, sims)
-    # beat_times_dict - mtrack_id: [t0, t1, t2, t3, ...]
-    import pandas as pd
-    rows = []
-    for mtrack_id, (chords, sims) in estimates_dict.items(): # run through every track
-        times = beat_times_dict[mtrack_id]                   # get the related time segment
-        n = min(len(chords), len(times) - 1)  
-        for i in range(n): # run one time for every segment
-            chord = chords[i]
-            if isinstance(chord, tuple):  # handle the ('N', sim) edge case
-                chord = chord[0]
-            rows.append({
-                'mtrack_id': mtrack_id,
-                'start_time': times[i],
-                'end_time': times[i + 1],
-                'chord': chord if chord else 'N',
-                'similarity': sims[i],
-            })
-    pd.DataFrame(rows).to_csv(filepath, index=False) # save as csv file
+    return f'{root}:{qual}'
 
+def manual_chord_evaluation(crema_df, cassette_df):
+  """
+  Evaluate cassette outputs against crema's
 
-def load_cassette_csv(filepath, mtrack_id):
-    """
-    Load CASSETTE (our own model) estimates for one track as (intervals, labels) for mir_eval.
-    """
-    import pandas as pd
+  Returns
+  -------
+  accuracy_list (list): list of accuracies (number of matches / number of beat intervals) per track
+  accuracy_inv_list (list): list of accuracies (number of matches / number of beat intervals) per track ignoring inversions
+  accuracy_triad_list (list): list of accuracies (number of matches / number of beat intervals) per track capturing triad harmonies
+  """
+  # combine crema & cassette labels for comparison
+  combined_df = cassette_df.merge(crema_df, on=['start_time', 'end_time'], suffixes=['_cassette', '_crema'])
 
-    # get time interval
-    df = pd.read_csv(filepath) # read csv
-    df = df[df['mtrack_id'] == mtrack_id].copy() # keep current track only
-    df = df.sort_values('start_time').reset_index(drop=True) # sort in chronological order
+  accuracy = (combined_df['value_cassette'] == combined_df['value_crema']).mean() * 100
+  accuracy_no_inv = (
+      (combined_df['value_cassette'] ==
+      combined_df['value_crema'].str.replace(r'/.*', '', regex=True))
+      .mean()
+  ) * 100
+  accuracy_triad = (combined_df['value_cassette'].apply(normalize_chord_label) 
+                    == combined_df['value_crema'].apply(normalize_chord_label)).mean() * 100
 
-    intervals = df[['start_time', 'end_time']].to_numpy(dtype=float)
-    
-    # get chord labels
-    labels = [normalize_chord_label(c) for c in df['chord'].fillna('N')]
+  return accuracy, accuracy_no_inv, accuracy_triad
 
-    return intervals, labels
+def get_mir_chord_scores(crema_df, cassette_df, normalize_labels=False):
+  """
+  Use mir_evalchord.evaluate to get scores for crema vs cassette comparison
 
+  Parameters
+  ----------
+  crema_df (pandas DataFrame)
+  cassette_df (pandas DataFrame)
+  normalize_labels (bool): whether to normalize chords or not (default False)
 
-def load_crema_csv(filepath):
-    """Load a CREMA prediction CSV for one track as (intervals, labels) for mir_eval."""
-    import pandas as pd
+  Returns
+  -------
+  score: individual scores for given track via mir_eval.chord.evaluate
+  """
+  # snap crema outputs to prevent overlapping of intervals
+  crema_df_copy = crema_df.copy()
+  cassette_df_copy = cassette_df.copy()
 
-    # read csv
-    df = pd.read_csv(filepath)
+  # align timestamps
+  crema_df_copy['start_time'] = crema_df_copy['start_time'].round(6)
+  crema_df_copy['end_time'] = crema_df_copy['end_time'].round(6)
 
-    # CREMA stores times as JAMS Timedelta strings; fall back to float if already numeric
-    # change start timecode to seconds: 0 days 00:00:01.500000 -> 1.5
-    try:
-        start_sec = pd.to_timedelta(df['time']).dt.total_seconds()
-    except Exception:
-        start_sec = df['time'].astype(float)
+  cassette_df_copy['start_time'] = cassette_df_copy['start_time'].round(6)
+  cassette_df_copy['end_time'] = cassette_df_copy['end_time'].round(6)
 
-    # convert duration timecode to seconds
-    try:
-        dur_sec = pd.to_timedelta(df['duration']).dt.total_seconds()
-    except Exception:
-        dur_sec = df['duration'].astype(float)
+  if normalize_labels:
+     score = mir_eval.chord.evaluate(
+        cassette_df_copy[['start_time', 'end_time']].values,
+        cassette_df_copy['value'].apply(normalize_chord_label).values,
+        crema_df_copy[['start_time', 'end_time']].values,
+        crema_df_copy['value'].apply(normalize_chord_label).values
+    )
+  
+  else:
+    score = mir_eval.chord.evaluate(
+        cassette_df_copy[['start_time', 'end_time']].values,
+        cassette_df_copy['value'].values,
+        crema_df_copy[['start_time', 'end_time']].values,
+        crema_df_copy['value'].values
+    )
 
-    end_sec = start_sec + dur_sec
-
-    order = start_sec.argsort().values # sort chronologically for mir_eval
-    start_sec  = start_sec.iloc[order].reset_index(drop=True)
-    end_sec    = end_sec.iloc[order].reset_index(drop=True)
-    labels_raw = df['value'].iloc[order].reset_index(drop=True)
-
-    intervals = np.column_stack([start_sec.to_numpy(dtype=float),
-                                 end_sec.to_numpy(dtype=float)])
-    labels = [normalize_chord_label(v) for v in labels_raw.fillna('N')]
-
-    return intervals, labels
-
-
-def evaluate_tracks(cassette_csv, crema_csv_dir, track_ids, crema_filename_fmt='{}.csv'):
-    """Evaluate CASSETTE against CREMA for all tracks; return per-track scores and their mean."""
-    import os
-
-    per_track = {}
-    all_scores = []
-
-
-    for track_id in track_ids:
-        crema_file = os.path.join(crema_csv_dir, crema_filename_fmt.format(track_id))
-        try:
-            # CREMA is the reference (established baseline); CASSETTE is the estimate
-            # load both csv file
-            ref_intervals, ref_labels = load_crema_csv(crema_file)
-            est_intervals, est_labels = load_cassette_csv(cassette_csv, track_id)
-
-            # evaluation core function
-            scores = mir_eval.chord.evaluate(ref_intervals, ref_labels,
-                                             est_intervals, est_labels)
-            per_track[track_id] = scores
-            all_scores.append(scores)
-
-        except Exception as e:
-            print(f"[evaluate_tracks] Skipping {track_id}: {e}") # keep going on bad tracks
-
-    if all_scores:  # if array is not emplty
-        metric_keys = all_scores[0].keys() # Get the metric names (e.g., 'root', 'triads', etc.) from the first track
-        # For each metric, collect its values across all tracks and compute the mean
-        mean_scores = {key: float(np.mean([s[key] for s in all_scores])) 
-                       for key in metric_keys}
-    else:
-        # If no tracks were successfully evaluated, return an empty result
-        mean_scores = {}
-        print("[evaluate_tracks] Warning: no tracks were evaluated successfully.")
-
-    return per_track, mean_scores
+  return score
