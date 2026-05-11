@@ -268,7 +268,7 @@ def classify_chord(mtrack_pcp, templates):
 
   return mtrack_chords, mtrack_sim
 
-def save_cassette_csv(beats, chord_estimates, track):
+def save_cassette_csv(beats, chord_estimates, track, downbeat=False):
   """
   Save CASSETTE model outputs in correct format (start_time, end_time, value)
 
@@ -277,6 +277,7 @@ def save_cassette_csv(beats, chord_estimates, track):
   beats (dict): dictionary of beats keyed by track id
   chord_estimates (dict): dictionary of chord estimates keyed by track id
   track (str): track id
+  downbeat (bool): whether saving downbeats (default False)
 
   Returns
   -------
@@ -287,10 +288,14 @@ def save_cassette_csv(beats, chord_estimates, track):
                                 'end_time': beats[track][1:], 
                                 'value': chord_estimates[track][0]})
   
-  os.makedirs('./output/cassette', exist_ok=True)
-
-  file_path = f"./output/cassette/{track}.csv"
-  cassette_csv.to_csv(file_path, index=False)
+  if downbeat:
+    os.makedirs('./output/cassette/downbeats', exist_ok=True)
+    file_path = f"./output/cassette/downbeats/{track}.csv"
+    cassette_csv.to_csv(file_path, index=False)
+  else:
+    os.makedirs('./output/cassette/beats', exist_ok=True)
+    file_path = f"./output/cassette/beats/{track}.csv"
+    cassette_csv.to_csv(file_path, index=False)
 
 def majority_label(beat_start, beat_end, segments):
   """
@@ -370,8 +375,8 @@ def normalize_chord_label(chord):
     Normalized chord label
     """
 
-    if chord == 'N':
-        return 'N'
+    if chord in ['N', 'X'] or 'sus' in chord:
+       return 'N'
 
     # remove inversion
     chord = chord.split('/')[0]
@@ -379,14 +384,15 @@ def normalize_chord_label(chord):
     # split root / quality
     root, qual = chord.split(':')
 
-    # triad reduction
-    if qual.startswith('min'):
+    # chord reduction
+    if qual in ['min7', 'hdim7', 'dim7']:
+       return f'{root}:min7'
+    if (qual in ['min', 'hdim', 'dim']) or (qual.startswith('min')):
         return f'{root}:min'
-    if qual.startswith('maj'):
+    if qual in ['maj7']:
+       return f'{root}:maj7'
+    if (qual in ['maj', 'aug']) or (qual.startswith('maj')):
         return f'{root}:maj'
-    if qual == '7':
-        return f'{root}:maj'
-
     return f'{root}:{qual}'
 
 def manual_chord_evaluation(crema_df, cassette_df):
